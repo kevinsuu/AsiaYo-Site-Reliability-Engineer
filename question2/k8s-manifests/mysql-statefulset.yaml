@@ -1,0 +1,193 @@
+# MySQL StatefulSet
+# mysql-0 是 Primary（writer），mysql-1 是 Replica（reader）
+# 每個 Pod 有獨立的 PVC，init container 負責設定檔和主從複製初始化
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: mysql
+  namespace: asiayo
+  labels:
+    app: mysql
+spec:
+  serviceName: mysql-headless
+  replicas: 2  # mysql-0 (writer), mysql-1 (reader)
+  selector:
+    matchLabels:
+      app: mysql
+  template:
+    metadata:
+      labels:
+        app: mysql
+    spec:
+      # Init Container 分兩個階段：
+      # 1. init-mysql：根據 Pod 序號複製對應設定檔（primary / replica）
+      # 2. clone-mysql：mysql-1 啟動時連到 mysql-0 建立主從複製關係
+      initContainers:
+      - name: init-mysql
+        image: mysql:8.0
+        command:
+        - bash
+        - -c
+        - |
+          # 根據 Pod 序號選擇對應的設定檔
+          [[ $(hostname) =~ -([0-9]+)$ ]] || exit 1
+          ordinal=${BASH_REMATCH[1]}
+          if [[ $ordinal -eq 0 ]]; then
+            cp /mnt/config/primary.cnf /mnt/conf.d/server.cnf
+          else
+            cp /mnt/config/replica.cnf /mnt/conf.d/server.cnf
+          fi
+        volumeMounts:
+        - name: config-map
+          mountPath: /mnt/config
+        - name: conf
+          mountPath: /mnt/conf.d
+
+      # clone-mysql：僅 mysql-1（Replica）執行，在 Primary 上建立 replication user
+      # mysql-0（Primary）直接跳過
+      # 注意：只處理 Primary 端的授權，Replica 本身的 CHANGE MASTER TO
+      # 需在主容器啟動後才能執行，因此移至 lifecycle.postStart
+      - name: clone-mysql
+        image: mysql:8.0
+        command:
+        - bash
+        - -c
+        - |
+          [[ $(hostname) =~ -([0-9]+)$ ]] || exit 1
+          ordinal=${BASH_REMATCH[1]}
+          # mysql-0 是 Primary，不需要設定複製，直接結束
+          [[ $ordinal -eq 0 ]] && exit 0
+
+          # 等待 mysql-0 準備好接受連線
+          until mysql -h mysql-0.mysql-headless.asiayo \
+            -u root -p${MYSQL_ROOT_PASSWORD} -e "SELECT 1" 2>/dev/null; do
+            echo "Waiting for mysql-0 to be ready..."
+            sleep 3
+          done
+
+          # 在 Primary 上建立 Replication User（若不存在）並授權
+          mysql -h mysql-0.mysql-headless.asiayo \
+            -u root -p${MYSQL_ROOT_PASSWORD} <<EOF
+          CREATE USER IF NOT EXISTS 'replicator'@'%'
+            IDENTIFIED BY '${MYSQL_REPLICATION_PASSWORD}';
+          GRANT REPLICATION SLAVE ON *.* TO 'replicator'@'%';
+          FLUSH PRIVILEGES;
+          EOF
+        env:
+        - name: MYSQL_ROOT_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: mysql-secret
+              key: root-password
+        - name: MYSQL_REPLICATION_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: mysql-secret
+              key: replication-password
+        volumeMounts:
+        - name: conf
+          mountPath: /etc/mysql/conf.d
+      containers:
+      - name: mysql
+        image: mysql:8.0
+        ports:
+        - containerPort: 3306
+          name: mysql
+        env:
+        - name: MYSQL_ROOT_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: mysql-secret
+              key: root-password
+        - name: MYSQL_REPLICATION_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: mysql-secret
+              key: replication-password
+        volumeMounts:
+        - name: mysql-data
+          mountPath: /var/lib/mysql
+        - name: conf
+          mountPath: /etc/mysql/conf.d
+        resources:
+          requests:
+            cpu: "500m"
+            memory: "1Gi"
+          limits:
+            cpu: "1"
+            memory: "2Gi"
+        # postStart：主容器啟動後才執行，此時 MySQL 已在 listen
+        # 只有 Replica（mysql-1）需要執行；Primary（mysql-0）直接 exit 0
+        # 加冪等檢查：若已有 Slave 設定則跳過，避免 Pod 重啟時重複執行
+        lifecycle:
+          postStart:
+            exec:
+              command:
+              - bash
+              - -c
+              - |
+                [[ $(hostname) =~ -([0-9]+)$ ]] || exit 0
+                ordinal=${BASH_REMATCH[1]}
+                [[ $ordinal -eq 0 ]] && exit 0
+
+                # 等待本地 MySQL 完全啟動後才繼續
+                until mysqladmin -h 127.0.0.1 -u root -p"${MYSQL_ROOT_PASSWORD}" \
+                  ping --silent 2>/dev/null; do
+                  echo "Waiting for local MySQL to be ready..."
+                  sleep 2
+                done
+
+                # 冪等檢查：若已有 Slave 設定（Pod 重啟情境），則跳過
+                slave_status=$(mysql -h 127.0.0.1 -u root -p"${MYSQL_ROOT_PASSWORD}" \
+                  -e "SHOW SLAVE STATUS\G" 2>/dev/null)
+                if [[ -n "$slave_status" ]]; then
+                  echo "Replication already configured, skipping."
+                  exit 0
+                fi
+
+                # 設定複製來源為 mysql-0 並啟動
+                mysql -h 127.0.0.1 -u root -p"${MYSQL_ROOT_PASSWORD}" <<EOF
+                CHANGE MASTER TO
+                  MASTER_HOST='mysql-0.mysql-headless.asiayo',
+                  MASTER_USER='replicator',
+                  MASTER_PASSWORD='${MYSQL_REPLICATION_PASSWORD}',
+                  MASTER_AUTO_POSITION=1;
+                START SLAVE;
+                EOF
+        livenessProbe:
+          exec:
+            command:
+            - mysqladmin
+            - ping
+            - -h
+            - localhost
+          initialDelaySeconds: 30
+          periodSeconds: 10
+          timeoutSeconds: 5
+        readinessProbe:
+          exec:
+            command:
+            - mysql
+            - -h
+            - localhost
+            - -e
+            - "SELECT 1"
+          initialDelaySeconds: 10
+          periodSeconds: 5
+          timeoutSeconds: 2
+      volumes:
+      - name: config-map
+        configMap:
+          name: mysql-config
+      - name: conf
+        emptyDir: {}
+  # 每個 Pod 獨立的持久化存儲
+  volumeClaimTemplates:
+  - metadata:
+      name: mysql-data
+    spec:
+      accessModes: ["ReadWriteOnce"]
+      storageClassName: gp3
+      resources:
+        requests:
+          storage: 20Gi

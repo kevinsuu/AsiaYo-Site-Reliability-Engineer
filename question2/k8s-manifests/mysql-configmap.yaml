@@ -1,0 +1,31 @@
+# MySQL ConfigMap
+# 提供 MySQL 主從複製所需的設定檔
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: mysql-config
+  namespace: asiayo
+data:
+  # Writer (Primary) 設定
+  primary.cnf: |
+    [mysqld]
+    server-id=1
+    log-bin=mysql-bin
+    binlog_expire_logs_seconds=604800
+    max_binlog_size=256M
+    binlog-format=ROW
+    gtid-mode=ON
+    enforce-gtid-consistency=ON
+    max_connections=500
+    innodb_buffer_pool_size=1G
+
+  # Reader (Replica) 設定
+  replica.cnf: |
+    [mysqld]
+    server-id=2
+    relay-log=relay-bin
+    read-only=ON
+    gtid-mode=ON
+    enforce-gtid-consistency=ON
+    max_connections=500
+    innodb_buffer_pool_size=1G

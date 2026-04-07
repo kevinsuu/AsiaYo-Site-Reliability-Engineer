@@ -1,0 +1,22 @@
+# 對應架構圖的 pvc ← pv
+#
+# 設計取捨：Deployment 刻意不掛載此 PVC
+# 原因：EBS 是 ReadWriteOnce，只能被單一 Node 掛載，與多副本 + Anti-Affinity 跨節點分散衝突
+# 實務做法：App 走 stateless 設計，檔案存取透過 IRSA 存取 S3
+# 若需共享磁碟，應改用 EFS（ReadWriteMany）
+#
+# pv.yaml 不需要手動建立：gp3 StorageClass 啟用動態佈建，PVC 建立時 K8s 自動產生對應 PV
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: asiayo-app-pvc
+  namespace: asiayo
+  labels:
+    app: asiayo-app
+spec:
+  accessModes:
+  - ReadWriteOnce
+  storageClassName: gp3
+  resources:
+    requests:
+      storage: 10Gi

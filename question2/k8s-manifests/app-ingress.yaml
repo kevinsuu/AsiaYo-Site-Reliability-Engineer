@@ -1,0 +1,39 @@
+# Ingress：對外暴露 asiayo.com，TLS 用 cert-manager 自動申請 Let's Encrypt
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: asiayo-ingress
+  namespace: asiayo
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+    nginx.ingress.kubernetes.io/proxy-body-size: '10m'
+    nginx.ingress.kubernetes.io/hsts: 'true'
+    nginx.ingress.kubernetes.io/hsts-max-age: '31536000'
+spec:
+  ingressClassName: nginx
+  tls:
+    - hosts:
+        - asiayo.com
+        - www.asiayo.com
+      secretName: asiayo-tls
+  rules:
+    - host: asiayo.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: asiayo-svc
+                port:
+                  number: 80
+    - host: www.asiayo.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: asiayo-svc
+                port:
+                  number: 80

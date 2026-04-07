@@ -1,0 +1,7 @@
+# Namespace: 將所有 AsiaYo 相關資源隔離在獨立的命名空間中
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: asiayo
+  labels:
+    app.kubernetes.io/part-of: asiayo

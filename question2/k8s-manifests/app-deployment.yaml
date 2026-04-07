@@ -1,0 +1,88 @@
+# 應用程式 Deployment
+# 3 副本 + Pod Anti-Affinity 分散節點，Rolling Update 確保更新不中斷
+# 無狀態設計，檔案走 S3，任一 Pod 掛掉直接替換不影響服務
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: asiayo-app
+  namespace: asiayo
+  labels:
+    app: asiayo-app
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: asiayo-app
+  # 滾動更新策略：更新時最多多 1 個 Pod，最少保持 2 個可用
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 1
+  template:
+    metadata:
+      labels:
+        app: asiayo-app
+    spec:
+      # Pod 反親和性：盡量將 Pod 分散到不同節點
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+          - weight: 100
+            podAffinityTerm:
+              labelSelector:
+                matchExpressions:
+                - key: app
+                  operator: In
+                  values:
+                  - asiayo-app
+              topologyKey: kubernetes.io/hostname
+      # 綁定 ServiceAccount，讓 Pod 透過 IRSA 取得 S3 存取權限
+      serviceAccountName: asiayo-app-sa
+      containers:
+      - name: app
+        image: asiayo/app:v1.0.0
+        ports:
+        - containerPort: 8080
+          name: http
+        env:
+        # 資料庫連線：讀寫分離，使用專屬 app 帳號（最小權限）
+        - name: DB_WRITER_HOST
+          value: "mysql-writer.asiayo.svc.cluster.local"
+        - name: DB_READER_HOST
+          value: "mysql-reader.asiayo.svc.cluster.local"
+        - name: DB_USER
+          value: "app"
+        - name: DB_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: mysql-secret
+              key: app-password
+        resources:
+          requests:
+            cpu: "250m"
+            memory: "512Mi"
+          limits:
+            cpu: "500m"
+            memory: "1Gi"
+        # 就緒探針：Pod 準備好接收流量時才加入 Service
+        readinessProbe:
+          httpGet:
+            path: /healthz
+            port: 8080
+          initialDelaySeconds: 5
+          periodSeconds: 10
+          failureThreshold: 3
+        # 存活探針：偵測 Pod 是否卡死，自動重啟
+        livenessProbe:
+          httpGet:
+            path: /healthz
+            port: 8080
+          initialDelaySeconds: 15
+          periodSeconds: 20
+          failureThreshold: 3
+      # 架構圖有 pvc → pv，此處刻意不掛載至 Deployment：
+      # EBS（ReadWriteOnce）只能被單一 Node 掛載，與 3 副本 + Anti-Affinity 多節點分散衝突
+      # 實務做法：檔案存取走 S3（透過 IRSA），App 保持 stateless，才能自由擴縮
+      # 若確實需要共享磁碟，應改用 EFS（ReadWriteMany）並替換 StorageClass
+      # PVC 定義見 app-pvc.yaml，保留作為架構圖對應元件的示意

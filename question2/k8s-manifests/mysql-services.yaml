@@ -1,0 +1,51 @@
+# MySQL Services：讀寫分離，writer 指向 mysql-0，reader 指向 mysql-1
+---
+# Headless Service 給 StatefulSet 內部 DNS 用
+apiVersion: v1
+kind: Service
+metadata:
+  name: mysql-headless
+  namespace: asiayo
+  labels:
+    app: mysql
+spec:
+  clusterIP: None
+  selector:
+    app: mysql
+  ports:
+  - port: 3306
+    targetPort: 3306
+---
+# Writer：指向 mysql-0（Primary）
+apiVersion: v1
+kind: Service
+metadata:
+  name: mysql-writer
+  namespace: asiayo
+  labels:
+    app: mysql
+    role: writer
+spec:
+  selector:
+    app: mysql
+    statefulset.kubernetes.io/pod-name: mysql-0
+  ports:
+  - port: 3306
+    targetPort: 3306
+---
+# Reader：指向 mysql-1（Replica），分擔讀取壓力
+apiVersion: v1
+kind: Service
+metadata:
+  name: mysql-reader
+  namespace: asiayo
+  labels:
+    app: mysql
+    role: reader
+spec:
+  selector:
+    app: mysql
+    statefulset.kubernetes.io/pod-name: mysql-1
+  ports:
+  - port: 3306
+    targetPort: 3306

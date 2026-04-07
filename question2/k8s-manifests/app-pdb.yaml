@@ -1,0 +1,14 @@
+# PodDisruptionBudget：Node 維護或升級 drain 時，確保至少 2 個 Pod 維持可用
+# 搭配 3 副本 Deployment + Pod Anti-Affinity，保障高可用
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: asiayo-app-pdb
+  namespace: asiayo
+  labels:
+    app: asiayo-app
+spec:
+  minAvailable: 2
+  selector:
+    matchLabels:
+      app: asiayo-app
